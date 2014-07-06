@@ -9,22 +9,18 @@ import (
 	"time"
 )
 
-const (
-	sendCount = 1
-)
-
-type ResultData struct {
-	Success  bool
-	Start    *time.Time
-	End      *time.Time
-	Duration *time.Time
-}
+// type ResultData struct {
+// 	Success  bool
+// 	Start    *time.Time
+// 	End      *time.Time
+// 	Duration *time.Time
+// }
 
 type Result struct {
 	HostId  int
 	Dropped int
 	Avg     float32
-	Data    [sendCount]ResultData
+	// Data    [sendCount]ResultData
 }
 
 type targetHost struct {
@@ -36,16 +32,19 @@ type targetHost struct {
 
 type Pinger struct {
 	Results   <-chan Result
+	SendEvery time.Duration
+	SubCount  int
+	SubDelay  time.Duration
+	Count     int
+
 	targets   []targetHost
 	hosts     []string
 	receivers []chan *ping
 	rchan     chan Result
 	running   bool
 	listen    net.PacketConn
-	SendDelay time.Duration
-	SendEvery time.Duration
 	recMap    map[string]chan *ping
-	pid       int
+	Id        int
 }
 
 type ping struct {
@@ -58,11 +57,20 @@ func NewPinger() *Pinger {
 	p.hosts = make([]string, 0, 10)
 	p.targets = make([]targetHost, 0, 10)
 	p.receivers = make([]chan *ping, 0, 10)
+
+	// Setup channel to send results out on
 	p.rchan = make(chan Result, 10)
-	p.recMap = make(map[string]chan *ping)
 	p.Results = p.rchan
-	p.SendDelay = time.Second
-	p.pid = os.Getpid()
+
+	p.recMap = make(map[string]chan *ping)
+
+	// Second a ping every second continuously
+	p.SubDelay = time.Second
+	p.SendEvery = 0
+	p.SubCount = 1
+
+	// default to PID so it's system unique
+	p.Id = os.Getpid()
 
 	return p
 }
@@ -79,11 +87,13 @@ func (p *Pinger) Start() error {
 	if p.running {
 		return errors.New("Pinger already running")
 	}
+	p.running = true
 
 	olduid := setRoot()
 	c, err := net.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
 		log.Printf("ListenPacket failed: %v\n", err)
+		p.running = false
 		return errors.New("Need a raw socket to ping (which requires root/admin)")
 	}
 	unsetRoot(olduid)
@@ -97,7 +107,7 @@ func (p *Pinger) start() {
 	go p.icmpReciever()
 	for id, h := range p.hosts {
 		rcvd := p.receivers[id]
-		sent := make(chan int, sendCount)
+		sent := make(chan int, p.SubCount)
 
 		ra, err := net.ResolveIPAddr("ip4:icmp", h)
 		if err != nil {
@@ -121,12 +131,12 @@ func (p *Pinger) pingHost(ra *net.IPAddr, sent chan<- int) {
 
 	count := 0
 	for {
-		for i := 0; i < sendCount; i++ {
+		for i := 0; i < p.SubCount; i++ {
 			p.sendEchoReq(ra, count)
 			sent <- count
 			count++
 			select {
-			case <-time.After(p.SendDelay):
+			case <-time.After(p.SubDelay):
 			}
 		}
 		select {
@@ -173,7 +183,7 @@ func (p *Pinger) icmpReciever() {
 			log.Printf("parseICMPMessage failed. bytecount=%v, data=%v. Error: %v\n", n, data, err)
 		}
 
-		log.Println("receieved", data)
+		// log.Println("receieved", data)
 
 		switch m.Type {
 		case icmpv4EchoRequest:
@@ -181,8 +191,8 @@ func (p *Pinger) icmpReciever() {
 		case icmpv4EchoReply:
 			switch ie := m.Body.(type) {
 			case *icmpEcho:
-				if ie.ID != p.pid {
-					log.Printf("Got echo_reply not matching our pid.  ignoring.")
+				if ie.ID != p.Id {
+					log.Printf("Got echo_reply not matching our Id.  ignoring.")
 					continue
 				}
 				res := &ping{ie, time.Now()}
@@ -205,7 +215,7 @@ func (p *Pinger) icmpReciever() {
 
 // sendEchoReq will issue an IPv4 ICMP Echo Request to the given raddr.
 func (p *Pinger) sendEchoReq(raddr *net.IPAddr, seq int) {
-	log.Printf("sending to %v id:%v seq:%v\n", raddr, p.pid, seq)
+	log.Printf("sending to %v id:%v seq:%v\n", raddr, p.Id, seq)
 
 	// Do we even need a write timeout for ICMP?  I think not.
 	// p.listen.SetWriteDeadline(time.Now().Add(2 * time.Second))
@@ -221,7 +231,7 @@ func (p *Pinger) sendEchoReq(raddr *net.IPAddr, seq int) {
 		Type: icmpv4EchoRequest,
 		Code: 0,
 		Body: &icmpEcho{
-			ID:   p.pid,
+			ID:   p.Id,
 			Seq:  seq,
 			Data: tdata,
 		},
