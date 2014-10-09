@@ -23,6 +23,7 @@ type Result struct {
 	// Data    [sendCount]ResultData
 }
 
+// targetHost
 type targetHost struct {
 	pingSent    chan int
 	pingHandler chan *ping
@@ -52,6 +53,7 @@ type ping struct {
 	rcvTime time.Time
 }
 
+// NewPinger creates a new Pinger
 func NewPinger() *Pinger {
 	p := new(Pinger)
 	p.hosts = make([]string, 0, 10)
@@ -165,12 +167,14 @@ func (p *Pinger) receiver(sent <-chan int, rcvd chan *ping) {
 
 }
 
+// icmpReciever
 func (p *Pinger) icmpReciever() {
 
 	var m *icmpMessage
 	// Needs to be 20 bytes larger for the IPv4 header
 	// rb := make([]byte, 20+len(wb))
-	rb := make([]byte, 512)
+	var rbI [512]byte
+	rb := rbI[0:]
 	for {
 		// p.listen.SetDeadline(time.Now().Add(1000 * time.Millisecond))
 		n, addr, err := p.listen.ReadFrom(rb)
